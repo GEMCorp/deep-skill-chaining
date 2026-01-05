@@ -16,6 +16,13 @@ from simple_rl.agents.func_approx.ddpg.DDPGAgentClass import DDPGAgent
 from simple_rl.agents.func_approx.dsc.utils import Experience
 
 class Option(object):
+	'''
+	Represents a single DSC skill (Option) with its own low-level policy (DDPGAgent from func_approx.ddpg.DDPGAgentClass),
+	  initiation classifier, timeout, and bookkeeping for training and execution.
+
+	Attributes:
+		Args in __init__
+	'''
 
 	def __init__(self, overall_mdp, name, global_solver, lr_actor, lr_critic, ddpg_batch_size, classifier_type="ocsvm",
 				 subgoal_reward=0., max_steps=20000, seed=0, parent=None, num_subgoal_hits_required=3, buffer_length=20,
@@ -23,24 +30,26 @@ class Option(object):
 				 generate_plots=False, device=torch.device("cpu"), writer=None):
 		'''
 		Args:
-			overall_mdp (MDP)
-			name (str)
-			global_solver (DDPGAgent)
-			lr_actor (float)
-			lr_critic (float)
-			ddpg_batch_size (int)
-			classifier_type (str)
-			subgoal_reward (float)
-			max_steps (int)
-			seed (int)
-			parent (Option)
-			dense_reward (bool)
-			enable_timeout (bool)
-			timeout (int)
-			initiation_period (int)
-			generate_plots (bool)
-			device (torch.device)
-			writer (SummaryWriter)
+			overall_mdp (MDP) : The environment where this option will be used.
+			name (str) : Identifier for the option; special names are global_option and overall_goal_policy.
+			global_solver (DDPGAgent) : The global DDPG agent used to initialize the global option and share experience with other options. For non-global options, reference to the global DDPGAgent whose weights seed the new option; global owns its own solver.
+			lr_actor (float) : Learning rate for the option's low-level DDPG policy.
+			lr_critic (float) : Learning rate for the option's low-level DDPG critic.
+			ddpg_batch_size (int) : Batch size for the option's low-level DDPG policy.
+			num_subgoal_hits_required (int) : Number of successful terminations required before training the initiation set classifier and initializing the option's low-level policy.
+			buffer_length (int) : Number of states to keep per initiation experience or experience buffer added to the option.
+			classifier_type (str) : Type of classifier used for the initiation set. Either "ocsvm" (one-class SVM), "elliptic" (Elliptic Envelope), or "tcsvm" (two-class SVM).
+			subgoal_reward (float) : Reward when the option hits its termination set; affects learning targets. Used to train the option's low-level policy (DDPGAgent).
+			max_steps (int) : Maximum number of steps allowed in the overall MDP during option execution. Episode budget upper bound considered during option execution.
+			seed (int) : Random seed for reproducibility.
+			parent (Option) : Parent option whose initiation set defines this option's termination set (for chained options). None for global option and goal option.
+			dense_reward (bool) : Whether to use dense subgoal rewards based on distance to goal/initiation set, or sparse (-1 per step) rewards.
+			enable_timeout (bool) : Whether to enable timeout for option execution.
+			timeout (int) : Timeout duration for option execution if enabled.
+			initiation_period (int) : Period for initiation set evaluation.
+			generate_plots (bool) : Whether to generate plots for debugging and analysis.
+			device (torch.device) : Device on which to run the option's computations.
+			writer (SummaryWriter) : Optional TensorBoard writer for logging.
 		'''
 		self.name = name
 		self.subgoal_reward = subgoal_reward
@@ -62,7 +71,7 @@ class Option(object):
 
 		if self.name == "global_option":
 			self.option_idx = 0
-		elif self.name == "overall_goal_policy":
+		elif self.name == "overall_goal_policy": # Goal option
 			self.option_idx = 1
 		else:
 			self.option_idx = self.parent.option_idx + 1
@@ -96,6 +105,7 @@ class Option(object):
 		self.taken_or_not = []
 		self.n_taken_or_not = 0
 
+	# Methods for identity and comparisons by name:
 	def __str__(self):
 		return self.name
 
@@ -114,6 +124,7 @@ class Option(object):
 		return not self == other
 
 	def get_training_phase(self):
+		""" Returns the current training phase of the option. """
 		if self.num_goal_hits < self.num_subgoal_hits_required:
 			return "gestation"
 		if self.num_goal_hits < (self.num_subgoal_hits_required + self.initiation_period):
@@ -123,6 +134,10 @@ class Option(object):
 		return "trained"
 
 	def initialize_with_global_ddpg(self):
+		""" 
+		Copy weights from global DDPG solver to local option DDPG solver for initializing the option's low-level policy.
+		Copies actor/critic weights from global_solver and replays compatible experiences into local solver if inside initiation set.
+		"""
 		for my_param, global_param in zip(self.solver.actor.parameters(), self.global_solver.actor.parameters()):
 			my_param.data.copy_(global_param.data)
 		for my_param, global_param in zip(self.solver.critic.parameters(), self.global_solver.critic.parameters()):
@@ -142,18 +157,28 @@ class Option(object):
 					self.solver.step(state, action, subgoal_reward, next_state, done)
 
 	def batched_is_init_true(self, state_matrix):
+		""" Check initiation set membership for a batch of states. """
 		if self.name == "global_option":
 			return np.ones((state_matrix.shape[0]))
 		position_matrix = state_matrix[:, :2]
 		return self.initiation_classifier.predict(position_matrix) == 1
 
 	def is_init_true(self, ground_state):
+		""" 
+		Check if the given ground state is in the option's initiation set.
+		 True everywhere for global_option; else checks classifier on 2D position features.
+		"""
 		if self.name == "global_option":
 			return True
 		features = ground_state.features()[:2] if isinstance(ground_state, State) else ground_state[:2]
 		return self.initiation_classifier.predict([features])[0] == 1
 
 	def is_term_true(self, ground_state):
+		""" 
+		Check if the given ground state is in the option's termination set. 
+		For non-global options, termination set is defined by parent's initiation set (when parent.is_init_true).
+		For global option and goal option, termination set is the goal states of the overall MDP.
+		"""
 		if self.parent is not None:
 			return self.parent.is_init_true(ground_state)
 
@@ -162,6 +187,12 @@ class Option(object):
 		return self.overall_mdp.is_goal_state(ground_state)
 
 	def add_initiation_experience(self, states):
+		""" 
+		Add a list of states to the initiation experience buffer. 
+		Args:
+			states (list): List of State objects representing the initiation experience.
+		Truncates trajectory to buffer_length and records positions into positive_examples.
+		"""
 		assert type(states) == list, "Expected initiation experience sample to be a queue"
 		segmented_states = deepcopy(states)
 		if len(states) >= self.buffer_length:
@@ -170,6 +201,12 @@ class Option(object):
 		self.positive_examples.append(segmented_positions)
 
 	def add_experience_buffer(self, experience_queue):
+		""" 
+		Add a list of experiences to the option's experience buffer. 
+		Args:
+			experience_queue (list): List of experiences (tuples) representing the experience buffer.
+		Wraps (s,a,r,s') tuples as Experience objects, truncates trajectory to buffer_length and records into experience_buffer.
+		"""
 		assert type(experience_queue) == list, "Expected initiation experience sample to be a list"
 		segmented_experiences = deepcopy(experience_queue)
 		if len(segmented_experiences) >= self.buffer_length:
@@ -179,20 +216,42 @@ class Option(object):
 
 	@staticmethod
 	def construct_feature_matrix(examples):
+		"""
+		Construct a feature matrix from a list of examples. Flattens list-of-lists of positions into an np.array for classifier fitting.
+		Args:
+			examples (list): List of lists of states.
+		Returns:
+			np.array: Feature matrix where each row is a state.
+		"""
 		states = list(itertools.chain.from_iterable(examples))
 		return np.array(states)
 
 	def get_distances_to_goal(self, position_matrix):
+		"""
+		Compute distances from a batch of positions to the option's goal (either overall MDP goal or parent's initiation set depending on option type).
+		Args:
+			position_matrix (np.array): Matrix of positions where each row is a position.
+		Returns:
+			np.array: Distances from each position to the goal/initiation set.
+		"""
 		if self.parent is None:
 			goal_position = self.overall_mdp.goal_position
 			return distance.cdist(goal_position[None, ...], position_matrix, "euclidean")
 
+		# else distance to parent’s initiation boundary (via SVM decision function).
 		distances = -self.parent.initiation_classifier.decision_function(position_matrix)
-		distances[distances <= 0.] = 0.
+		distances[distances <= 0.] = 0. # Clamp negative distances to zero
 		return distances
 
 	@staticmethod
 	def distance_to_weights(distances):
+		"""
+		Convert distances to normalized weights ([0,1]-scaled) using an exponential decay function. Purpose is to weight closer examples higher. (used for weighted training if needed)
+		Args:
+			distances (np.array): Array of distances.
+		Returns:
+			np.array: Weights corresponding to distances.
+		"""
 		weights = np.copy(distances)
 		for row in range(weights.shape[0]):
 			if weights[row] > 0.:
@@ -202,6 +261,9 @@ class Option(object):
 		return weights
 
 	def train_one_class_svm(self):
+		"""
+		Fits OneClassSVM on positive position examples.
+		"""
 		assert len(self.positive_examples) == self.num_subgoal_hits_required, "Expected init data to be a list of lists"
 		positive_feature_matrix = self.construct_feature_matrix(self.positive_examples)
 
@@ -210,6 +272,9 @@ class Option(object):
 		self.initiation_classifier.fit(positive_feature_matrix)
 
 	def train_elliptic_envelope_classifier(self):
+		"""
+		Fits EllipticEnvelope on positive position examples.
+		"""
 		assert len(self.positive_examples) == self.num_subgoal_hits_required, "Expected init data to be a list of lists"
 		positive_feature_matrix = self.construct_feature_matrix(self.positive_examples)
 
@@ -217,6 +282,9 @@ class Option(object):
 		self.initiation_classifier.fit(positive_feature_matrix)
 
 	def train_two_class_classifier(self):
+		"""
+		Fits a two-class SVM on positive and negative position examples.
+		""" 
 		positive_feature_matrix = self.construct_feature_matrix(self.positive_examples)
 		negative_feature_matrix = self.construct_feature_matrix(self.negative_examples)
 		positive_labels = [1] * positive_feature_matrix.shape[0]
@@ -243,6 +311,9 @@ class Option(object):
 		self.classifier_type = "tcsvm"
 
 	def train_initiation_classifier(self):
+		"""
+		Train the initiation set classifier based on the specified classifier type.
+		"""
 		if self.classifier_type == "ocsvm":
 			self.train_one_class_svm()
 		elif self.classifier_type == "elliptic":
@@ -251,7 +322,10 @@ class Option(object):
 			raise NotImplementedError("{} not supported".format(self.classifier_type))
 
 	def initialize_option_policy(self):
-		# Initialize the local DDPG solver with the weights of the global option's DDPG solver
+		"""
+		Initialize the local DDPG solver with the weights of the global option's DDPG solver,
+			syncs epsilon, and performs fitted Q-iteration using accumulated experience_buffer
+		"""
 		self.initialize_with_global_ddpg()
 
 		self.solver.epsilon = self.global_solver.epsilon
@@ -265,6 +339,8 @@ class Option(object):
 	def train(self, experience_buffer, state_buffer):
 		"""
 		Called every time the agent hits the current option's termination set.
+		Records initiation experiences and experience buffer, increments goal hit count,
+			trains initiation classifier and initializes option policy if enough goal hits have occurred.
 		Args:
 			experience_buffer (list)
 			state_buffer (list)
@@ -306,7 +382,15 @@ class Option(object):
 		return subgoal_reward
 
 	def off_policy_update(self, state, action, reward, next_state):
-		""" Make off-policy updates to the current option's low level DDPG solver. """
+		""" 
+		Make off-policy updates to the current option's low level DDPG solver from external transitions 
+			only when inside initiation and not at termination.
+		Args:
+			state (State): current state
+			action (int): action taken
+			reward (float): reward received
+			next_state (State): next state reached
+		"""
 		assert self.overall_mdp.is_primitive_action(action), "option should be markov: {}".format(action)
 		assert not state.is_terminal(), "Terminal state did not terminate at some point"
 
@@ -323,7 +407,15 @@ class Option(object):
 			self.solver.step(state.features(), action, subgoal_reward, next_state.features(), next_state.is_terminal())
 
 	def update_option_solver(self, s, a, r, s_prime):
-		""" Make on-policy updates to the current option's low-level DDPG solver. """
+		""" 
+		Make on-policy updates to the current option's low-level DDPG solver during option execution;
+			handles success (subgoal_reward), terminal, and intermediate shaped reward.
+		Args:
+			s (State): current state
+			a (int): action taken
+			r (float): reward received
+			s_prime (State): next state reached
+		"""
 		assert self.overall_mdp.is_primitive_action(a), "Option solver should be over primitive actions: {}".format(a)
 		assert not s.is_terminal(), "Terminal state did not terminate at some point"
 
@@ -344,6 +436,7 @@ class Option(object):
 	def execute_option_in_mdp(self, mdp, step_number):
 		"""
 		Option main control loop.
+		Checks if current state is in initiation set of option, then loops until termination, terminal state, max steps, or timeout
 
 		Args:
 			mdp (MDP): environment where actions are being taken
@@ -407,6 +500,15 @@ class Option(object):
 
 	def refine_initiation_set_classifier(self, visited_states, start_state, final_state, num_steps,
 										 outer_step_number):
+		"""
+		Refine the initiation set classifier after each successful or timed-out execution during initiation phase.
+		Args:
+			visited_states (list): List of State objects visited during option execution.
+			start_state (State): State where option execution started.
+			final_state (State): State where option execution ended.
+			num_steps (int): Number of steps taken during option execution.
+			outer_step_number (int): Total number of steps taken in the overall MDP.
+		"""
 		if self.is_term_true(final_state):  # success
 			positive_states = [start_state] + visited_states[-self.buffer_length:]
 			positive_examples = [state.position for state in positive_states]
@@ -424,6 +526,17 @@ class Option(object):
 			self.train_two_class_classifier()
 
 	def trained_option_execution(self, mdp, outer_step_counter):
+		"""
+		Execute the option in the MDP until termination, terminal state, max steps, or timeout.
+		Args:
+			mdp (MDP): environment where actions are being taken
+			outer_step_counter (int): how many steps have already elapsed in the outer control loop.
+		Returns:
+			score (float): cumulative reward obtained by executing the option
+			state (State): state where option execution ended
+			step_number (int): updated step number after option execution
+			state_option_trajectory (list): list of (option_idx, state) tuples visited during option execution
+		"""
 		state = mdp.cur_state
 		score, step_number = 0., deepcopy(outer_step_counter)
 		num_steps = 0
