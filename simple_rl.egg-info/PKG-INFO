@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: simple_rl
+Version: 0.0.0+local
+Summary: Local editable install of simple_rl from deep-skill-chaining workspace
+Dynamic: summary

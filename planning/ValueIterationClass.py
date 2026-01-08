@@ -16,7 +16,7 @@ from simple_rl.planning.PlannerClass import Planner
 class ValueIteration(Planner):
 
     def __init__(self, mdp, name="value_iter", delta=0.0001, max_iterations=500, sample_rate=3):
-        '''
+        r'''
         Args:
             mdp (MDP)
             delta (float): After an iteration if VI, if no change more than @\delta has occurred, terminates.

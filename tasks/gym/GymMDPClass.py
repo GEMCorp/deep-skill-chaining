@@ -9,7 +9,7 @@ import os
 import random
 
 # Other imports.
-import gym
+import gymnasium as gym
 from simple_rl.mdp.MDPClass import MDP
 from simple_rl.tasks.gym.GymStateClass import GymState
 
@@ -30,7 +30,7 @@ class NormalizedEnv(gym.ActionWrapper):
 class GymMDP(MDP):
     ''' Class for Gym MDPs '''
 
-    def __init__(self, env_name='CartPole-v0', render=False):
+    def __init__(self, env_name='CartPole-v1', render=False):
         '''
         Args:
             env_name (str)
@@ -38,7 +38,9 @@ class GymMDP(MDP):
         self.env_name = env_name
         self.env = NormalizedEnv(gym.make(env_name))
         self.render = render
-        MDP.__init__(self, range(self.env.action_space.shape[0]), self._transition_func, self._reward_func, init_state=GymState(self.env.reset()))
+        # Gymnasium reset returns (obs, info)
+        init_obs, _init_info = self.env.reset()
+        MDP.__init__(self, range(self.env.action_space.shape[0]), self._transition_func, self._reward_func, init_state=GymState(init_obs))
 
     def _reward_func(self, state, action):
         '''
@@ -49,7 +51,8 @@ class GymMDP(MDP):
         Returns
             (float)
         '''
-        obs, reward, is_terminal, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        is_terminal = bool(terminated) or bool(truncated)
 
         if self.render:
             self.env.render()
@@ -70,7 +73,19 @@ class GymMDP(MDP):
         return self.next_state
 
     def reset(self):
+        # Maintain Gymnasium semantics; ignore info for MDP init here.
         self.env.reset()
+
+    def seed(self, seed=None):
+        """Seed the environment and its action space under Gymnasium semantics."""
+        try:
+            self.env.reset(seed=seed)
+        except TypeError:
+            pass
+        try:
+            self.env.action_space.seed(seed)
+        except Exception:
+            pass
 
     def __str__(self):
         return "gym-" + str(self.env_name)

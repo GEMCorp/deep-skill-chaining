@@ -85,7 +85,7 @@ class DoubleQAgent(QLearningAgent):
 
         # Randomly choose either "A" or "B".
         which_q_func = "A" if bool(random.getrandbits(1)) else "B"
-        other_q_func = "B" if which_q_func is "A" else "A"
+        other_q_func = "B" if which_q_func == "A" else "A"
 
         # Update the Q Function.
 

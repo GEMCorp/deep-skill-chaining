@@ -53,7 +53,7 @@ def play_markov_game(agent_ls, markov_game_mdp, instances=10, episodes=100, step
 
     # Record how long each agent spends learning.
     print("Running experiment: \n" + str(experiment))
-    start = time.clock()
+    start = time.perf_counter()
 
     # For each instance of the agent.
     for instance in range(1, instances + 1):
@@ -112,7 +112,7 @@ def play_markov_game(agent_ls, markov_game_mdp, instances=10, episodes=100, step
             a.reset()
 
     # Time stuff.
-    print("Experiment took " + str(round(time.clock() - start, 2)) + " seconds.")
+    print("Experiment took " + str(round(time.perf_counter() - start, 2)) + " seconds.")
 
     experiment.make_plots(open_plot=open_plot)
 
@@ -167,14 +167,14 @@ def run_agents_lifelong(agents,
 
     # Record how long each agent spends learning.
     print("Running experiment: \n" + str(experiment))
-    start = time.clock()
+    start = time.perf_counter()
 
     times = defaultdict(float)
 
     # Learn.
     for agent in agents:
         print(str(agent) + " is learning.")
-        start = time.clock()
+        start = time.perf_counter()
 
 
         # --- SAMPLE NEW MDP ---
@@ -197,7 +197,7 @@ def run_agents_lifelong(agents,
             agent.reset()
 
         # Track how much time this agent took.
-        end = time.clock()
+        end = time.perf_counter()
         times[agent] = round(end - start, 3)
 
 
@@ -261,7 +261,7 @@ def run_agents_on_mdp(agents,
     for agent in agents:
         print(str(agent) + " is learning.")
 
-        start = time.clock()
+        start = time.perf_counter()
 
         # For each instance.
         for instance in range(1, instances + 1):
@@ -274,7 +274,7 @@ def run_agents_on_mdp(agents,
             mdp.end_of_instance()
 
         # Track how much time this agent took.
-        end = time.clock()
+        end = time.perf_counter()
         time_dict[agent] = round(end - start, 3)
         print()
 
@@ -312,7 +312,7 @@ def run_single_agent_on_mdp(agent, mdp, episodes, steps, experiment=None, verbos
         # Compute initial state/reward.
         state = mdp.get_init_state()
         reward = 0
-        episode_start_time = time.clock()
+        episode_start_time = time.perf_counter()
 
         # Extra printing if verbose.
         if verbose:
@@ -325,7 +325,7 @@ def run_single_agent_on_mdp(agent, mdp, episodes, steps, experiment=None, verbos
                 _increment_bar()
 
             # step time
-            step_start = time.clock()
+            step_start = time.perf_counter()
 
             # Compute the agent's policy.
             action = agent.act(state, reward)
@@ -334,7 +334,7 @@ def run_single_agent_on_mdp(agent, mdp, episodes, steps, experiment=None, verbos
             if state.is_terminal():
                 if episodes == 1 and not reset_at_terminal and experiment is not None and action != "terminate":
                     # Self loop if we're not episodic or resetting and in a terminal state.
-                    experiment.add_experience(agent, state, action, 0, state, time_taken=time.clock()-step_start)
+                    experiment.add_experience(agent, state, action, 0, state, time_taken=time.perf_counter()-step_start)
                     continue
                 break
 
@@ -348,7 +348,7 @@ def run_single_agent_on_mdp(agent, mdp, episodes, steps, experiment=None, verbos
             if experiment is not None:
                 reward_to_track = mdp.get_gamma()**(step + 1 + episode*steps) * reward if track_disc_reward else reward
                 reward_to_track = round(reward_to_track, 5)
-                experiment.add_experience(agent, state, action, reward_to_track, next_state, time_taken=time.clock() - step_start)
+                experiment.add_experience(agent, state, action, reward_to_track, next_state, time_taken=time.perf_counter() - step_start)
 
             if next_state.is_terminal():
                 if reset_at_terminal:
