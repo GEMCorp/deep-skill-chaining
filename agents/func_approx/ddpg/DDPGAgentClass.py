@@ -77,14 +77,33 @@ class DDPGAgent(Agent):
 
         if self.writer is not None:
             self.n_acting_iterations = self.n_acting_iterations + 1
-            self.writer.add_scalar("{}_action_x".format(self.name), action[0], self.n_acting_iterations)
-            self.writer.add_scalar("{}_action_y".format(self.name), action[1], self.n_acting_iterations)
-            self.writer.add_scalar("{}_state_x".format(self.name), state[0], self.n_acting_iterations)
-            self.writer.add_scalar("{}_state_y".format(self.name), state[1], self.n_acting_iterations)
-            self.writer.add_scalar("{}_state_xdot".format(self.name), state[2], self.n_acting_iterations)
-            self.writer.add_scalar("{}_state_ydot".format(self.name), state[3], self.n_acting_iterations)
-            self.writer.add_scalar("{}_noise_x".format(self.name), noise[0], self.n_acting_iterations)
-            self.writer.add_scalar("{}_noise_y".format(self.name), noise[1], self.n_acting_iterations)
+            # Dimension-safe logging for actions, states, and noise.
+            # Logs only available components to avoid index errors on 1D actions or shorter states.
+            try:
+                # Actions
+                if len(action) >= 1:
+                    self.writer.add_scalar("{}_action_x".format(self.name), action[0], self.n_acting_iterations)
+                if len(action) >= 2:
+                    self.writer.add_scalar("{}_action_y".format(self.name), action[1], self.n_acting_iterations)
+
+                # State features
+                if len(state) >= 1:
+                    self.writer.add_scalar("{}_state_x".format(self.name), state[0], self.n_acting_iterations)
+                if len(state) >= 2:
+                    self.writer.add_scalar("{}_state_y".format(self.name), state[1], self.n_acting_iterations)
+                if len(state) >= 3:
+                    self.writer.add_scalar("{}_state_xdot".format(self.name), state[2], self.n_acting_iterations)
+                if len(state) >= 4:
+                    self.writer.add_scalar("{}_state_ydot".format(self.name), state[3], self.n_acting_iterations)
+
+                # Exploration noise
+                if len(noise) >= 1:
+                    self.writer.add_scalar("{}_noise_x".format(self.name), noise[0], self.n_acting_iterations)
+                if len(noise) >= 2:
+                    self.writer.add_scalar("{}_noise_y".format(self.name), noise[1], self.n_acting_iterations)
+            except Exception as e:
+                # Silently skip logging issues to avoid interrupting training.
+                pass
 
         return action
 
