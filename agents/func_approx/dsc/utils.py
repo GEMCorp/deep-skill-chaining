@@ -11,8 +11,15 @@ import imageio
 from PIL import Image
 
 # Other imports.
-from simple_rl.tasks.point_maze.PointMazeStateClass import PointMazeState
-from simple_rl.tasks.point_maze.PointMazeMDPClass import PointMazeMDP
+# Optional imports: only needed for point-maze plotting/utilities.
+try:
+	from simple_rl.tasks.point_maze.PointMazeStateClass import PointMazeState
+except Exception:
+	PointMazeState = None
+try:
+	from simple_rl.tasks.point_maze.PointMazeMDPClass import PointMazeMDP
+except Exception:
+	PointMazeMDP = None
 
 class Experience(object):
 	def __init__(self, s, a, r, s_prime):
@@ -42,7 +49,7 @@ class Experience(object):
 
 def plot_trajectory(trajectory, color='k', marker="o"):
 	for i, state in enumerate(trajectory):
-		if isinstance(state, PointMazeState):
+		if (PointMazeState is not None) and isinstance(state, PointMazeState):
 			x = state.position[0]
 			y = state.position[1]
 		else:

@@ -11,7 +11,10 @@ import pdb
 import time
 
 # Other imports.
-import gym
+try:
+    import gymnasium as gym
+except ImportError:
+    import gym
 from simple_rl.mdp.MDPClass import MDP
 from simple_rl.tasks.fixed_reacher.FixedReacherStateClass import FixedReacherState
 

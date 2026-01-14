@@ -26,7 +26,9 @@ class SkillChaining(object):
 	def __init__(self, mdp, max_steps, lr_actor, lr_critic, ddpg_batch_size, device, max_num_options=5,
 				 subgoal_reward=0., enable_option_timeout=True, buffer_length=20, num_subgoal_hits_required=3,
 				 classifier_type="ocsvm", init_q=None, generate_plots=False, use_full_smdp_update=False,
-				 log_dir="", seed=0, tensor_log=False):
+				 log_dir="", seed=0, tensor_log=False,
+				 use_ivf=False, ivf_c=0.5, ivf_c1=0.2, ivf_c2=0.2, uncertainty_method="competence",
+				 selection_mode="epsilon_greedy", ivf_step_penalty=0.0):
 		"""
 		Args:
 			mdp (MDP): Underlying domain we have to solve
@@ -63,6 +65,15 @@ class SkillChaining(object):
 		self.max_num_options = max_num_options
 		self.classifier_type = classifier_type
 		self.dense_reward = mdp.dense_reward
+		# IVF config
+		self.use_ivf = use_ivf
+		self.ivf_c = ivf_c
+		self.ivf_c1 = ivf_c1
+		self.ivf_c2 = ivf_c2
+		self.uncertainty_method = uncertainty_method
+		self.ivf_step_penalty = ivf_step_penalty
+		# Selection mode: "epsilon_greedy" or "categorical"
+		self.selection_mode = selection_mode
 
 		tensor_name = "runs/{}_{}".format(args.experiment_name, seed)
 		self.writer = SummaryWriter(tensor_name) if tensor_log else None
@@ -80,8 +91,10 @@ class SkillChaining(object):
 									ddpg_batch_size=ddpg_batch_size, num_subgoal_hits_required=num_subgoal_hits_required,
 									subgoal_reward=self.subgoal_reward, seed=self.seed, max_steps=self.max_steps,
 									enable_timeout=self.enable_option_timeout, classifier_type=classifier_type,
-									generate_plots=self.generate_plots, writer=self.writer, device=self.device,
-									dense_reward=self.dense_reward)
+			    generate_plots=self.generate_plots, writer=self.writer, device=self.device,
+			    dense_reward=self.dense_reward,
+			    use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+			    ivf_step_penalty=self.ivf_step_penalty)
 
 		self.trained_options = [self.global_option]
 
@@ -95,8 +108,10 @@ class SkillChaining(object):
 							 ddpg_batch_size=ddpg_batch_size, num_subgoal_hits_required=num_subgoal_hits_required,
 							 subgoal_reward=self.subgoal_reward, seed=self.seed, max_steps=self.max_steps,
 							 enable_timeout=self.enable_option_timeout, classifier_type=classifier_type,
-							 generate_plots=self.generate_plots, writer=self.writer, device=self.device,
-							 dense_reward=self.dense_reward)
+		     generate_plots=self.generate_plots, writer=self.writer, device=self.device,
+		     dense_reward=self.dense_reward,
+		     use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+		     ivf_step_penalty=self.ivf_step_penalty)
 
 		# This is our policy over options
 		# We use (double-deep) (intra-option) Q-learning to learn the Q-values of *options* at any queried state Q(s, o)
@@ -137,7 +152,9 @@ class SkillChaining(object):
 									  num_subgoal_hits_required=self.num_subgoal_hits_required,
 									  seed=self.seed, parent=parent_option,  max_steps=self.max_steps,
 									  enable_timeout=self.enable_option_timeout,
-									  writer=self.writer, device=self.device, dense_reward=self.dense_reward)
+				      writer=self.writer, device=self.device, dense_reward=self.dense_reward,
+				      use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+				      ivf_step_penalty=self.ivf_step_penalty)
 
 		new_untrained_option_id = id(new_untrained_option)
 		assert new_untrained_option_id != old_untrained_option_id, "Checking python references"
@@ -222,8 +239,49 @@ class SkillChaining(object):
 		self.agent_over_options = new_global_agent
 
 	def act(self, state):
-		# Query the global Q-function to determine which option to take in the current state
-		option_idx = self.agent_over_options.act(state.features(), train_mode=True)
+		# IVF-weighted selection: combine DQN scores with J⁺(s,o) if enabled
+		if self.use_ivf:
+			# raw q-values
+			q_values = self.agent_over_options.get_qvalues(state.features())
+			# mask impossible options similar to DQN act
+			state_t = torch.from_numpy(state.features()).float().unsqueeze(0).to(self.device)
+			impossible_idx = self.agent_over_options.get_impossible_option_idx(state_t)
+			for idx in impossible_idx:
+				q_values[0][idx] = torch.min(q_values, dim=1)[0] - 1.
+			# compute J⁺ per option
+			j_plus = []
+			for opt in self.trained_options:
+				j_plus.append(opt.J_plus(state))
+			j_plus_t = torch.tensor(j_plus, dtype=torch.float32, device=self.device).unsqueeze(0)
+			weighted = (q_values * j_plus_t).cpu().data.numpy()
+			epsilon = self.agent_over_options.epsilon
+			all_idx = list(range(len(self.trained_options)))
+			possible_idx = list(set(all_idx).difference(impossible_idx))
+
+			if self.selection_mode == "categorical":
+				# With probability (1 - epsilon), sample proportionally to (mu * J⁺); else uniform over feasible
+				if random.random() > epsilon:
+					w = weighted[0]
+					# zero-out impossible and negative weights; normalize
+					for idx in impossible_idx:
+						w[idx] = 0.0
+					w = np.maximum(w, 0.0)
+					w_sum = float(np.sum(w))
+					if w_sum > 0.0 and len(possible_idx) > 0:
+						p = w / w_sum
+						option_idx = int(np.random.choice(len(w), p=p))
+					else:
+						option_idx = random.choice(possible_idx)
+				else:
+					option_idx = random.choice(possible_idx)
+			else:
+				# Default epsilon-greedy argmax over weighted scores
+				if random.random() > epsilon:
+					option_idx = int(np.argmax(weighted))
+				else:
+					option_idx = random.choice(possible_idx)
+		else:
+			option_idx = self.agent_over_options.act(state.features(), train_mode=True)
 		self.agent_over_options.update_epsilon()
 
 		# Selected option
@@ -259,6 +317,9 @@ class SkillChaining(object):
 
 		option_reward = self.get_reward_from_experiences(option_transitions)
 		next_state = self.get_next_state_from_experiences(option_transitions)
+		if next_state is None:
+			# No transitions collected (e.g., immediate termination): keep current state
+			next_state = state
 
 		# If we triggered the untrained option's termination condition, add to its buffer of terminal transitions
 		if self.untrained_option.is_term_true(next_state) and not self.untrained_option.is_term_true(state):
@@ -290,6 +351,8 @@ class SkillChaining(object):
 
 	@staticmethod
 	def get_next_state_from_experiences(experiences):
+		if len(experiences) == 0:
+			return None
 		return experiences[-1][-1]
 
 	@staticmethod
@@ -301,12 +364,26 @@ class SkillChaining(object):
 		return total_reward
 
 	def should_create_more_options(self):
+		# IVF creation rule: if for all options, E[J(s0,o)] < c1 and E[U(s0,o)] < c2 over s0~rho0
+		if not self.use_ivf:
+			local_options = self.trained_options[1:]
+			for start_state in self.init_states:
+				for option in local_options:  # type: Option
+					if option.is_init_true(start_state):
+						print("Init state is in {}'s initiation set classifier".format(option.name))
+						return False
+			return True
 		local_options = self.trained_options[1:]
-		for start_state in self.init_states:
-			for option in local_options:  # type: Option
-				if option.is_init_true(start_state):
-					print("Init state is in {}'s initiation set classifier".format(option.name))
-					return False
+		if len(local_options) == 0:
+			return True
+		for option in local_options:  # type: Option
+			j_vals = []
+			u_vals = []
+			for s0 in self.init_states:
+				j_vals.append(option.J_value(s0))
+				u_vals.append(option.U_value(s0))
+			if (np.mean(j_vals) >= self.ivf_c1) or (np.mean(u_vals) >= self.ivf_c2):
+				return False
 		return True
 		# return len(self.trained_options) < self.max_num_options
 
@@ -501,6 +578,15 @@ if __name__ == '__main__':
 	parser.add_argument("--classifier_type", type=str, help="ocsvm/elliptic for option initiation clf", default="ocsvm")
 	parser.add_argument("--init_q", type=str, help="compute/zero", default="zero")
 	parser.add_argument("--use_smdp_update", type=bool, help="sparse/SMDP update for option policy", default=False)
+	# IVF flags and thresholds
+	parser.add_argument("--use_ivf", type=bool, help="Use IVF instead of initiation classifiers", default=False)
+	parser.add_argument("--ivf_c", type=float, help="IVF initiation threshold c", default=0.5)
+	parser.add_argument("--ivf_c1", type=float, help="Creation rule threshold E[J] < c1", default=0.2)
+	parser.add_argument("--ivf_c2", type=float, help="Creation rule threshold E[U] < c2", default=0.2)
+	parser.add_argument("--uncertainty_method", type=str, help="competence/count uncertainty method", default="competence")
+	parser.add_argument("--ivf_step_penalty", type=float, help="Per-step penalty in IVF mode (non-terminal steps)", default=0.0)
+	# Selection mode for option choice
+	parser.add_argument("--selection_mode", type=str, help="epsilon_greedy/categorical option selection mode", default="epsilon_greedy")
 	args = parser.parse_args()
 
 	if "reacher" in args.env.lower():
@@ -523,7 +609,8 @@ if __name__ == '__main__':
 		overall_mdp = GymMDP(args.env, render=args.render)
 		state_dim = overall_mdp.env.observation_space.shape[0]
 		action_dim = overall_mdp.env.action_space.shape[0]
-		overall_mdp.env.seed(args.seed)
+		# Gymnasium-compatible seeding: use the MDP wrapper's seed method
+		overall_mdp.seed(args.seed)
 
 	# Create folders for saving various things
 	logdir = create_log_dir(args.experiment_name)
@@ -542,7 +629,10 @@ if __name__ == '__main__':
 							seed=args.seed, subgoal_reward=args.subgoal_reward,
 							log_dir=logdir, num_subgoal_hits_required=args.num_subgoal_hits,
 							enable_option_timeout=args.option_timeout, init_q=q0, use_full_smdp_update=args.use_smdp_update,
-							generate_plots=args.generate_plots, tensor_log=args.tensor_log, device=args.device)
+							generate_plots=args.generate_plots, tensor_log=args.tensor_log, device=args.device,
+						use_ivf=args.use_ivf, ivf_c=args.ivf_c, ivf_c1=args.ivf_c1, ivf_c2=args.ivf_c2,
+						uncertainty_method=args.uncertainty_method, selection_mode=args.selection_mode,
+						ivf_step_penalty=args.ivf_step_penalty)
 	episodic_scores, episodic_durations = chainer.skill_chaining(args.episodes, args.steps)
 
 	# Log performance metrics

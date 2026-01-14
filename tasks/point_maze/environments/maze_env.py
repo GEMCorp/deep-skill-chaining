@@ -20,7 +20,10 @@ import tempfile
 import xml.etree.ElementTree as ET
 import math
 import numpy as np
-import gym
+try:
+  import gymnasium as gym
+except ImportError:  # fallback for older installs
+  import gym
 import pdb
 
 from simple_rl.tasks.point_maze.environments import maze_env_utils

@@ -5,6 +5,8 @@ import numpy as np
 import pdb
 from copy import deepcopy
 import torch
+import torch.nn as nn
+import torch.optim as optim
 from sklearn import svm
 from sklearn.covariance import EllipticEnvelope
 import itertools
@@ -27,7 +29,9 @@ class Option(object):
 	def __init__(self, overall_mdp, name, global_solver, lr_actor, lr_critic, ddpg_batch_size, classifier_type="ocsvm",
 				 subgoal_reward=0., max_steps=20000, seed=0, parent=None, num_subgoal_hits_required=3, buffer_length=20,
 				 dense_reward=False, enable_timeout=True, timeout=100, initiation_period=2,
-				 generate_plots=False, device=torch.device("cpu"), writer=None):
+				 generate_plots=False, device=torch.device("cpu"), writer=None,
+				 use_ivf=False, c_threshold=0.5, uncertainty_method="competence", c_u=0.1,
+				 ivf_step_penalty=0.0):
 		'''
 		Args:
 			overall_mdp (MDP) : The environment where this option will be used.
@@ -62,6 +66,11 @@ class Option(object):
 		self.classifier_type = classifier_type
 		self.generate_plots = generate_plots
 		self.writer = writer
+		self.use_ivf = use_ivf
+		self.c_threshold = c_threshold
+		self.uncertainty_method = uncertainty_method
+		self.c_u = c_u
+		self.ivf_step_penalty = ivf_step_penalty
 
 		self.timeout = np.inf
 
@@ -87,6 +96,32 @@ class Option(object):
 		solver_name = "{}_ddpg_agent".format(self.name)
 		self.global_solver = DDPGAgent(state_size, action_size, seed, device, lr_actor, lr_critic, ddpg_batch_size, name=solver_name) if name == "global_option" else global_solver
 		self.solver = DDPGAgent(state_size, action_size, seed, device, lr_actor, lr_critic, ddpg_batch_size, tensor_log=(writer is not None), writer=writer, name=solver_name)
+
+		# IVF networks (small MLP, sigmoid output)
+		self.device = device
+		if self.use_ivf:
+			self.ivf_net = nn.Sequential(
+				nn.Linear(state_size, 64),
+				nn.ReLU(),
+				nn.Linear(64, 1),
+				nn.Sigmoid()
+			).to(self.device)
+			self.ivf_target_net = nn.Sequential(
+				nn.Linear(state_size, 64),
+				nn.ReLU(),
+				nn.Linear(64, 1),
+				nn.Sigmoid()
+			).to(self.device)
+
+			# initialize target params
+			for tparam, param in zip(self.ivf_target_net.parameters(), self.ivf_net.parameters()):
+				tparam.data.copy_(param.data)
+
+			self.ivf_optimizer = optim.Adam(self.ivf_net.parameters(), lr=1e-3)
+			self.ivf_target_tau = 1e-3
+			# buffers for uncertainty
+			from collections import defaultdict
+			self._counts = defaultdict(int)
 
 		# Attributes related to initiation set classifiers
 		self.num_goal_hits = 0
@@ -160,16 +195,25 @@ class Option(object):
 		""" Check initiation set membership for a batch of states. """
 		if self.name == "global_option":
 			return np.ones((state_matrix.shape[0]))
+		if self.use_ivf:
+			vals = []
+			for i in range(state_matrix.shape[0]):
+				s = state_matrix[i, :]
+				vals.append(float(self._ivf_forward(self.ivf_net, s)))
+			return (np.array(vals) > self.c_threshold).astype(np.int32)
 		position_matrix = state_matrix[:, :2]
 		return self.initiation_classifier.predict(position_matrix) == 1
 
 	def is_init_true(self, ground_state):
 		""" 
 		Check if the given ground state is in the option's initiation set.
-		 True everywhere for global_option; else checks classifier on 2D position features.
+		 True everywhere for global_option; IVF mode uses J(s,o) > c; else classifier.
 		"""
 		if self.name == "global_option":
 			return True
+		if self.use_ivf:
+			j = float(self._ivf_forward(self.ivf_net, self._state_features(ground_state)))
+			return j > self.c_threshold
 		features = ground_state.features()[:2] if isinstance(ground_state, State) else ground_state[:2]
 		return self.initiation_classifier.predict([features])[0] == 1
 
@@ -193,6 +237,9 @@ class Option(object):
 			states (list): List of State objects representing the initiation experience.
 		Truncates trajectory to buffer_length and records positions into positive_examples.
 		"""
+		# IVF mode learns initiation online; skip classifier data collection
+		if self.use_ivf:
+			return
 		assert type(states) == list, "Expected initiation experience sample to be a queue"
 		segmented_states = deepcopy(states)
 		if len(states) >= self.buffer_length:
@@ -314,6 +361,9 @@ class Option(object):
 		"""
 		Train the initiation set classifier based on the specified classifier type.
 		"""
+		if self.use_ivf:
+			# IVF is learned online; no classifier training needed
+			return
 		if self.classifier_type == "ocsvm":
 			self.train_one_class_svm()
 		elif self.classifier_type == "elliptic":
@@ -359,15 +409,23 @@ class Option(object):
 
 	def get_subgoal_reward(self, state):
 
+		# If at termination, caller should handle success reward; avoid double-counting here.
 		if self.is_term_true(state):
 			print("~~~~~ Warning: subgoal query at goal ~~~~~")
-			return 0.
+			return 0.0
 
+		# IVF mode: use pure indicator at success (handled elsewhere) and 0 per-step otherwise.
+		# This aligns option-policy updates with Algorithm 1 while avoiding double-counting.
+		if self.use_ivf:
+			# Apply optional per-step penalty in IVF mode (positive hyperparam → negative reward)
+			return -float(self.ivf_step_penalty)
+
+		# Classifier mode below
 		# Return step penalty in sparse reward domain
 		if not self.dense_reward:
-			return -1.
+			return -1.0
 
-		# Rewards based on position only
+		# Rewards based on position only (classifier mode)
 		position_vector = state.features()[:2] if isinstance(state, State) else state[:2]
 
 		# For global and parent option, we use the negative distance to the goal state
@@ -378,7 +436,7 @@ class Option(object):
 		dist = self.parent.initiation_classifier.decision_function(position_vector.reshape(1, -1))[0]
 
 		# Decision_function returns a negative distance for points not inside the classifier
-		subgoal_reward = 0. if dist >= 0 else dist
+		subgoal_reward = 0.0 if dist >= 0 else dist
 		return subgoal_reward
 
 	def off_policy_update(self, state, action, reward, next_state):
@@ -425,13 +483,19 @@ class Option(object):
 
 		if self.is_term_true(s_prime):
 			print("{} execution successful".format(self.name))
-			self.solver.step(s.features(), a, self.subgoal_reward, s_prime.features(), True)
+			reward_to_use = 1.0 if self.use_ivf else self.subgoal_reward
+			self.solver.step(s.features(), a, reward_to_use, s_prime.features(), True)
 		elif s_prime.is_terminal():
 			print("[{}]: {} is_terminal() but not term_true()".format(self.name, s))
-			self.solver.step(s.features(), a, self.subgoal_reward, s_prime.features(), True)
+			reward_to_use = 1.0 if self.use_ivf else self.subgoal_reward
+			self.solver.step(s.features(), a, reward_to_use, s_prime.features(), True)
 		else:
 			subgoal_reward = self.get_subgoal_reward(s_prime)
 			self.solver.step(s.features(), a, subgoal_reward, s_prime.features(), False)
+
+		# IVF TD update
+		if self.use_ivf:
+			self.update_ivf(s, s_prime)
 
 	def execute_option_in_mdp(self, mdp, step_number):
 		"""
@@ -497,6 +561,126 @@ class Option(object):
 			return option_transitions, total_reward
 
 		raise Warning("Wanted to execute {}, but initiation condition not met".format(self))
+
+	# -------------------------
+	# IVF helpers and updates
+	# -------------------------
+	def _state_features(self, ground_state):
+		"""
+		Return a plain numpy feature vector for IVF networks.
+		Args:
+			ground_state (State or np.array): simple_rl `State` or raw feature array.
+		Returns:
+			np.array: feature vector used as input to `ivf_net` / `ivf_target_net`.
+		"""
+		return ground_state.features() if isinstance(ground_state, State) else ground_state
+
+	def _ivf_forward(self, net, features_np):
+		"""
+		Compute a single forward pass through the given IVF network.
+		Args:
+			net (nn.Module): IVF network (`ivf_net` or `ivf_target_net`).
+			features_np (State or np.array): input features or `State` to evaluate.
+		Returns:
+			float: scalar IVF value in [0, 1].
+		"""
+		if isinstance(features_np, State):
+			features_np = features_np.features()
+		x = torch.from_numpy(np.array(features_np)).float().unsqueeze(0).to(self.device)
+		net.eval()
+		with torch.no_grad():
+			y = net(x)
+		net.train()
+		return y[0][0].item()
+
+	def J_value(self, ground_state):
+		"""
+		Return the current IVF estimate `J(s, o)` for this option.
+		For the `global_option`, returns 1.0. Uses `ivf_net` in IVF mode.
+		"""
+		if self.name == "global_option":
+			return 1.0
+		return float(self._ivf_forward(self.ivf_net, self._state_features(ground_state))) if self.use_ivf else 1.0
+
+	def J_target_value(self, ground_state):
+		"""
+		Return the target-network IVF estimate `J_target(s, o)` for stability.
+		For the `global_option`, returns 1.0.
+		"""
+		if self.name == "global_option":
+			return 1.0
+		return float(self._ivf_forward(self.ivf_target_net, self._state_features(ground_state))) if self.use_ivf else 1.0
+
+	def U_value(self, ground_state):
+		"""
+		Estimate uncertainty `U(s, o)` about the IVF prediction.
+		Methods:
+		- competence: absolute difference between online and target IVF (`|J - J_target|`).
+		- count: count-based bonus `c_u / sqrt(N(s, o))` using coarse position bins.
+		Returns 0.0 when IVF mode is disabled.
+		"""
+		if not self.use_ivf:
+			return 0.0
+		if self.uncertainty_method == "competence":
+			return abs(self.J_value(ground_state) - self.J_target_value(ground_state))
+		# count-based, bin by position (first two dims)
+		feats = self._state_features(ground_state)
+		pos = feats[:2]
+		key = (int(round(pos[0]*10)), int(round(pos[1]*10)), self.option_idx)
+		n = max(1, self._counts[key])
+		return float(self.c_u / np.sqrt(n))
+
+	def J_plus(self, ground_state):
+		"""
+		Compute optimistic executability `J⁺(s, o) = clip(J + U, 0, 1)`.
+		Returns 1.0 when IVF mode is disabled.
+		"""
+		if not self.use_ivf:
+			return 1.0
+		val = self.J_value(ground_state) + self.U_value(ground_state)
+		return float(np.clip(val, 0.0, 1.0))
+
+	def _soft_update_ivf(self):
+		"""
+		Soft-update the target IVF network parameters with coefficient `ivf_target_tau`.
+		"""
+		for tparam, param in zip(self.ivf_target_net.parameters(), self.ivf_net.parameters()):
+			tparam.data.copy_(self.ivf_target_tau * param.data + (1.0 - self.ivf_target_tau) * tparam.data)
+
+	def update_ivf(self, s, s_prime):
+		"""
+		Perform a TD(0) update for the IVF.
+		Target: `beta(s') + J_target(s')`, where `beta(s') = 1` if `is_term_true(s')` else `0`.
+		Updates online IVF (`ivf_net`), then softly updates the target network and count-based statistics.
+		Args:
+			s (State): current state.
+			s_prime (State): next state.
+		"""
+		# TD(0): target = beta(s') + J_target(s')
+		beta_sp = 1.0 if self.is_term_true(s_prime) else 0.0
+		s_np = self._state_features(s)
+		sp_np = self._state_features(s_prime)
+
+		states = torch.from_numpy(np.array(s_np)).float().unsqueeze(0).to(self.device)
+		next_states = torch.from_numpy(np.array(sp_np)).float().unsqueeze(0).to(self.device)
+
+		j_s = self.ivf_net(states)
+		with torch.no_grad():
+			j_sp_target = self.ivf_target_net(next_states)
+		target = torch.clamp(j_sp_target + beta_sp, 0.0, 1.0)
+
+		loss = torch.mean((j_s - target)**2)
+		self.ivf_optimizer.zero_grad()
+		loss.backward()
+		self.ivf_optimizer.step()
+
+		# update counts for count-based U
+		if self.uncertainty_method == "count":
+			pos = s_np[:2]
+			key = (int(round(pos[0]*10)), int(round(pos[1]*10)), self.option_idx)
+			self._counts[key] += 1
+
+		self._soft_update_ivf()
 
 	def refine_initiation_set_classifier(self, visited_states, start_state, final_state, num_steps,
 										 outer_step_number):

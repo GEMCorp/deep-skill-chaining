@@ -1,0 +1,51 @@
+***
+
+### Section 4.3 Sequentially Composable Options
+
+Options are said to be sequentially executable when each option terminates in a region where another option can successfully achieve its own subgoal. Sequentially composable options are more useful for high-level planning and even result in highly robust solutions. While most methods attempt to sequentially compose discovered options post hoc, some methods explicitly incorporate sequential composition into the option discovery objective. A prominent family of such methods is that of Skill Chaining.
+
+Figure 8 illustrates the skill chaining algorithm. Given a target region of states $g\subset\mathcal{S}$ (for example, the task goal) (shown as a flag in Figure 8), skill chaining discovers subgoal options that can be sequenced together so that each option execution roughly brings the agent closer to $g$. This is done by learning options backward from the goal: first, the agent learns option $o_{1}$ such that $\beta(o_{1})=g$; this entails learning two functions: (a) the option policy $\pi(a|s,o_{1})$, which aims to maximize the subgoal reward $r^{o_{1}}(s)=\beta(o_{1})$, and (b) the initiation function $\mathcal{J}(o_{1})$, which is defined to be the states from which $\pi(\cdot|s,o_{1})$ can reliably reach $g$. Shortly after, the agent creates another option $o_{2}$ so that its subgoal is the initiation of the previous option—this is because the agent can reach the goal with high probability from states inside the first option's initiation region. This process continues until the start state, $s_{0}\sim\rho_{0}$, of the MDP is inside the initiation region of some option. This is because when the initiation probability is high at the start state, the agent can simply execute its learned options to achieve its goal $g$. Skill composability is explicitly enforced by setting the termination region of each option $\beta(o_{i})$ to be the states in which another option has a high initiation probability, i.e., $\mathcal{J}(o_{i-1})$ is greater than some pre-specified threshold $c\in$.
+
+In skill chaining, the initiation set of an option has special meaning: it represents the states from which option execution is likely to achieve its subgoal. Learning the initiation function is usually framed as a binary classification problem: states along successful option trajectories (those that achieve the option's subgoal) are considered as positive examples $s^{+}=\{s_{1}^{+},\cdot\cdot\cdot,s_{n}^{+}\}$ and states along unsuccessful trajectories are considered as negative examples $s^{-}=\{s_{1}^{-},\cdot\cdot\cdot,s_{m}^{-}\}$. Then, a probabilistic classifier (with parameters $\chi$) is fit on these training examples using the binary cross-entropy loss. Now, when a new state $s$ is encountered during learning, $\mathcal{J}(s,o)$ represents the probability that the agent can reach option $o$'s subgoal $\beta(o)$ in a single execution of $\pi(\cdot|s,o)$. While this classification approach is simple to implement, some of its drawbacks include: (a) the classifier struggles to adapt to changing option policies, and (b) the agent must wait until the end of option execution to update its initiation function. To address this issue, Bagaria et al. (2023) frame the initiation function as a **general value function (GVF)**: the agent uses each experience tuple $(s,a,\beta(o),s^{\prime})$ to update its prediction of whether an option execution will achieve its subgoal. This is done using the following temporal difference (TD) error and stochastic gradient descent update rule:
+
+$$\delta_{\mathcal{J}}(s,o)=\beta(s^{\prime},o)+\mathcal{J}(s^{\prime},o)-\mathcal{J}(s,o), \text{}$$
+$$\chi=\chi-\alpha\delta_{\mathcal{J}}\nabla_{\chi}\mathcal{J}(s,o), \text{}$$
+
+where $\alpha\in\mathbb{R}^{+}$ is a step size parameter and $\chi$ are the initiation function parameters. However, at a given state $s$, an option's initiation probability $\mathcal{J}_{\chi}(s,o)$ can be low either because the option policy is unlikely to successfully reach its subgoal from state $s$ or because the agent does not have enough data to confidently estimate $J_{\chi}(s,o)$. As a result, the skill chaining agent additionally estimates its **uncertainty $\mathcal{U}(s,o)$** about its initiation function's predictions: when deciding whether an option is executable from a state $s$, it is optimistic with respect to that uncertainty, but when targeting another option's initiation region, it is pessimistic with respect to it.
+
+Algorithm 1 summarizes the skill chaining algorithm. First, the high-level policy picks an option with the aim of maximizing extrinsic reward, while attending to the initiation probability of each option. Actions are selected using the chosen option's policy, which is rewarded for achieving its own subgoal. Transitions encountered during option execution are used to update the low-level option policy, the high-level policy, and the option's initiation function. When the agent is confident that there is no option that could reach its subgoal from the start states of the environment, it creates a new option and adds it to the skill chain. This new option's subgoal region is the states where the previous option in the skill chain has a high initiation probability, thereby enforcing sequential composability.
+
+***
+
+### Algorithm 1 Skill Chaining Algorithm
+
+**1:** Initialize:
+**2:** Initialize first option $o_{1}$ subgoal as task goal: $\beta(o_{1})=g.$
+**3:** Initialize $o_{1}$ initiation function $\mathcal{J}(s,o_{1})$, uncertainty $\mathcal{U}(s,o_{1})$, and policy $\pi_{\theta}(\cdot|s,o_{1})$.
+**4:** Initialize the agent's option set using the first option: $\mathcal{O}=\{o_{1}\}$.
+**5:** Hyperparameters:
+**6:** Option horizon $H_{o}$ and initiation function thresholds $c_{1}, c_{2}\in$ for each option.
+**7:** while True do
+**8:** Sample an option $o$ from the following distribution:
+
+$$\frac{\mu(o|s)\mathcal{J}^{+}(s,o)}{\sum_{o^{\prime}\in\mathcal{O}}\mu(o^{\prime}|s)\mathcal{J}^{+}(s,o^{\prime})},\forall o\in\mathcal{O}, \text{}$$
+
+where $\mathcal{J}^{+}(s,o^{\prime})=clip(\mathcal{J}(s,o^{\prime})+\mathcal{U}(s,o),0,1)$.
+
+**9:** while option $o$ does not terminate do
+**10:** Sample an action $a\sim\pi(\cdot|s,o)$
+**11:** Execute the action to get reward $r$ and next state $s^{\prime}$.
+**12:** Update the option policy $\pi(\cdot|s,o)$ using reward $r^{o}(s,a,s^{\prime})=\beta(s^{\prime},o).$
+**13:** Update the high-level policy using extrinsic reward $r$.
+**14:** Update the option's initiation function using generalized TD-Error:
+
+$$\delta_{\mathcal{J}}(s,o)=\beta(s^{\prime},o)+\mathcal{J}(s^{\prime},o)-\mathcal{J}(s,o). \text{}$$
+
+**15:** end while
+
+**16:** if $\mathbb{E}_{s_{0}\sim\rho_{0}}[\mathcal{J}(s_{0},o)]<c_{1}\&\mathbb{E}_{s_{0}\sim\rho_{0}}[\mathcal{U}(s_{0},o)]<c_{2}.$ $\forall o\in\mathcal{O}$ then
+**17:** Extract the last option in the chain, $\omega$.
+**18:** Create new option $o^{\prime}$ such that $\beta(s,o^{\prime})=\mathbb{I}(\mathcal{J}(s,\omega)>c)$
+**19:** Add the new option $o^{\prime}$ to the agent's option set $\mathcal{O}$.
+**20:** end if
+**21:** end while
