@@ -24,12 +24,12 @@ from simple_rl.agents.func_approx.dqn.DQNAgentClass import DQNAgent
 
 class SkillChaining(object):
 	def __init__(self, mdp, max_steps, lr_actor, lr_critic, ddpg_batch_size, device, max_num_options=5,
-				 subgoal_reward=0., enable_option_timeout=True, buffer_length=20, num_subgoal_hits_required=3,
-				 classifier_type="ocsvm", init_q=None, generate_plots=False, use_full_smdp_update=False,
+				 enable_option_timeout=True,
+				 init_q=None, generate_plots=False, use_full_smdp_update=False,
 				 log_dir="", seed=0, tensor_log=False,
-				 use_ivf=False, ivf_c=0.5, ivf_c1=0.2, ivf_c2=0.2, uncertainty_method="competence",
-				 selection_mode="epsilon_greedy", ivf_step_penalty=0.0):
-		"""
+				 ivf_c=0.5, ivf_c1=0.2, ivf_c2=0.2, uncertainty_method="competence",
+				 ivf_step_penalty=0.0):
+		"""                                                                       4
 		Args:
 			mdp (MDP): Underlying domain we have to solve
 			max_steps (int): Number of time steps allowed per episode of the MDP
@@ -37,11 +37,7 @@ class SkillChaining(object):
 			lr_critic (float): Learning rate for DDPG Critic
 			ddpg_batch_size (int): Batch size for DDPG agents
 			device (str): torch device {cpu/cuda:0/cuda:1}
-			subgoal_reward (float): Hitting a subgoal must yield a supplementary reward to enable local policy
 			enable_option_timeout (bool): whether or not the option times out after some number of steps
-			buffer_length (int): size of trajectories used to train initiation sets of options
-			num_subgoal_hits_required (int): number of times we need to hit an option's termination before learning
-			classifier_type (str): Type of classifier we will train for option initiation sets
 			init_q (float): If not none, we use this value to initialize the value of a new option
 			generate_plots (bool): whether or not to produce plots in this run
 			use_full_smdp_update (bool): sparse 0/1 reward or discounted SMDP reward for training policy over options
@@ -52,28 +48,20 @@ class SkillChaining(object):
 		self.mdp = mdp
 		self.original_actions = deepcopy(mdp.actions)
 		self.max_steps = max_steps
-		self.subgoal_reward = subgoal_reward
 		self.enable_option_timeout = enable_option_timeout
 		self.init_q = init_q
 		self.use_full_smdp_update = use_full_smdp_update
 		self.generate_plots = generate_plots
-		self.buffer_length = buffer_length
-		self.num_subgoal_hits_required = num_subgoal_hits_required
 		self.log_dir = log_dir
 		self.seed = seed
 		self.device = torch.device(device)
 		self.max_num_options = max_num_options
-		self.classifier_type = classifier_type
-		self.dense_reward = mdp.dense_reward
 		# IVF config
-		self.use_ivf = use_ivf
 		self.ivf_c = ivf_c
 		self.ivf_c1 = ivf_c1
 		self.ivf_c2 = ivf_c2
 		self.uncertainty_method = uncertainty_method
 		self.ivf_step_penalty = ivf_step_penalty
-		# Selection mode: "epsilon_greedy" or "categorical"
-		self.selection_mode = selection_mode
 
 		tensor_name = "runs/{}_{}".format(args.experiment_name, seed)
 		self.writer = SummaryWriter(tensor_name) if tensor_log else None
@@ -87,15 +75,13 @@ class SkillChaining(object):
 
 		# This option has an initiation set that is true everywhere and is allowed to operate on atomic timescale only
 		self.global_option = Option(overall_mdp=self.mdp, name="global_option", global_solver=None,
-									lr_actor=lr_actor, lr_critic=lr_critic, buffer_length=buffer_length,
-									ddpg_batch_size=ddpg_batch_size, num_subgoal_hits_required=num_subgoal_hits_required,
-									subgoal_reward=self.subgoal_reward, seed=self.seed, max_steps=self.max_steps,
-									enable_timeout=self.enable_option_timeout, classifier_type=classifier_type,
-			    generate_plots=self.generate_plots, writer=self.writer, device=self.device,
-			    dense_reward=self.dense_reward,
-			    use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
-			    ivf_step_penalty=self.ivf_step_penalty)
-
+									lr_actor=lr_actor, lr_critic=lr_critic,
+									ddpg_batch_size=ddpg_batch_size,
+									seed=self.seed, max_steps=self.max_steps,
+									enable_timeout=self.enable_option_timeout,
+									generate_plots=self.generate_plots, writer=self.writer, device=self.device,
+									c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+									ivf_step_penalty=self.ivf_step_penalty)
 		self.trained_options = [self.global_option]
 
 		# This is our first untrained option - one that gets us to the goal state from nearby the goal
@@ -104,14 +90,13 @@ class SkillChaining(object):
 		# Once we hit its termination condition N times, we will start learning its initiation set
 		# Once we have learned its initiation set, we will create its child option
 		goal_option = Option(overall_mdp=self.mdp, name='overall_goal_policy', global_solver=self.global_option.solver,
-							 lr_actor=lr_actor, lr_critic=lr_critic, buffer_length=buffer_length,
-							 ddpg_batch_size=ddpg_batch_size, num_subgoal_hits_required=num_subgoal_hits_required,
-							 subgoal_reward=self.subgoal_reward, seed=self.seed, max_steps=self.max_steps,
-							 enable_timeout=self.enable_option_timeout, classifier_type=classifier_type,
-		     generate_plots=self.generate_plots, writer=self.writer, device=self.device,
-		     dense_reward=self.dense_reward,
-		     use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
-		     ivf_step_penalty=self.ivf_step_penalty)
+							 lr_actor=lr_actor, lr_critic=lr_critic,
+							 ddpg_batch_size=ddpg_batch_size,
+							 seed=self.seed, max_steps=self.max_steps,
+							 enable_timeout=self.enable_option_timeout,
+							 generate_plots=self.generate_plots, writer=self.writer, device=self.device,
+							 c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+							 ivf_step_penalty=self.ivf_step_penalty)
 
 		# This is our policy over options
 		# We use (double-deep) (intra-option) Q-learning to learn the Q-values of *options* at any queried state Q(s, o)
@@ -146,20 +131,15 @@ class SkillChaining(object):
 									  lr_actor=parent_option.solver.actor_learning_rate,
 									  lr_critic=parent_option.solver.critic_learning_rate,
 									  ddpg_batch_size=parent_option.solver.batch_size,
-									  subgoal_reward=self.subgoal_reward,
-									  buffer_length=self.buffer_length,
-									  classifier_type=self.classifier_type,
-									  num_subgoal_hits_required=self.num_subgoal_hits_required,
-									  seed=self.seed, parent=parent_option,  max_steps=self.max_steps,
+									  seed=self.seed, parent=parent_option, max_steps=self.max_steps,
 									  enable_timeout=self.enable_option_timeout,
-				      writer=self.writer, device=self.device, dense_reward=self.dense_reward,
-				      use_ivf=self.use_ivf, c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
-				      ivf_step_penalty=self.ivf_step_penalty)
-
-		new_untrained_option_id = id(new_untrained_option)
-		assert new_untrained_option_id != old_untrained_option_id, "Checking python references"
-		assert id(new_untrained_option.parent) == old_untrained_option_id, "Checking python references"
-
+									  writer=self.writer, device=self.device,
+									  c_threshold=self.ivf_c, uncertainty_method=self.uncertainty_method,
+									  ivf_step_penalty=self.ivf_step_penalty)
+# Bring in assertions here
+		assert new_untrained_option is not None, "Failed to create new untrained option"
+		assert old_untrained_option_id != id(new_untrained_option), "Option creation failed: object of same parent option returned"
+		assert new_untrained_option.parent is parent_option, "New option doesn't link to parent option"
 		return new_untrained_option
 
 	def make_off_policy_updates_for_options(self, state, action, reward, next_state):
@@ -177,8 +157,6 @@ class SkillChaining(object):
 			next_state (State): state we landed in after executing the option
 			option_transitions (list): list of (s, a, r, s') tuples representing the trajectory during option execution
 		"""
-		assert self.subgoal_reward == 0, "This kind of SMDP update only makes sense when subgoal reward is 0"
-
 		def get_reward(transitions):
 			gamma = self.global_option.solver.gamma
 			raw_rewards = [tt[2] for tt in transitions]
@@ -195,7 +173,7 @@ class SkillChaining(object):
 					self.agent_over_options.step(start_state.features(), action, option_reward, next_state.features(),
 												 next_state.is_terminal(), num_steps=len(sub_transitions))
 				else:
-					option_reward = self.subgoal_reward if selected_option.is_term_true(next_state) else -1.
+					option_reward = 1.0 if selected_option.is_term_true(next_state) else -1. #maybe change scale for +1 / 0: pure success indicator or a full discounted option return:
 					self.agent_over_options.step(start_state.features(), action, option_reward, next_state.features(),
 												 next_state.is_terminal(), num_steps=1)
 
@@ -239,55 +217,58 @@ class SkillChaining(object):
 		self.agent_over_options = new_global_agent
 
 	def act(self, state):
-		# IVF-weighted selection: combine DQN scores with J⁺(s,o) if enabled
-		if self.use_ivf:
-			# raw q-values
-			q_values = self.agent_over_options.get_qvalues(state.features())
-			# mask impossible options similar to DQN act
-			state_t = torch.from_numpy(state.features()).float().unsqueeze(0).to(self.device)
-			impossible_idx = self.agent_over_options.get_impossible_option_idx(state_t)
-			for idx in impossible_idx:
-				q_values[0][idx] = torch.min(q_values, dim=1)[0] - 1.
-			# compute J⁺ per option
-			j_plus = []
-			for opt in self.trained_options:
-				j_plus.append(opt.J_plus(state))
-			j_plus_t = torch.tensor(j_plus, dtype=torch.float32, device=self.device).unsqueeze(0)
-			weighted = (q_values * j_plus_t).cpu().data.numpy()
-			epsilon = self.agent_over_options.epsilon
-			all_idx = list(range(len(self.trained_options)))
-			possible_idx = list(set(all_idx).difference(impossible_idx))
+		"""
+		Sample option o from:
+			p(o|s) = [mu(o|s) * J_plus(s,o)] / sum_o' [mu(o'|s) * J_plus(s,o')]
+		where mu(o|s) is derived from the policy-over-options logits (DQN q-values)
+		via softmax over feasible options only.
+		"""
+		# Q-values from policy-over-options (shape: [1, num_options])
+		q_values_t = self.agent_over_options.get_qvalues(state.features()).detach().cpu().numpy().reshape(-1)
 
-			if self.selection_mode == "categorical":
-				# With probability (1 - epsilon), sample proportionally to (mu * J⁺); else uniform over feasible
-				if random.random() > epsilon:
-					w = weighted[0]
-					# zero-out impossible and negative weights; normalize
-					for idx in impossible_idx:
-						w[idx] = 0.0
-					w = np.maximum(w, 0.0)
-					w_sum = float(np.sum(w))
-					if w_sum > 0.0 and len(possible_idx) > 0:
-						p = w / w_sum
-						option_idx = int(np.random.choice(len(w), p=p))
-					else:
-						option_idx = random.choice(possible_idx)
-				else:
-					option_idx = random.choice(possible_idx)
-			else:
-				# Default epsilon-greedy argmax over weighted scores
-				if random.random() > epsilon:
-					option_idx = int(np.argmax(weighted))
-				else:
-					option_idx = random.choice(possible_idx)
+		# Feasibility mask
+		state_t = torch.from_numpy(state.features()).float().unsqueeze(0).to(self.device)
+		impossible_idx = set(self.agent_over_options.get_impossible_option_idx(state_t))
+		possible_idx = [i for i in range(len(self.trained_options)) if i not in impossible_idx]
+
+		if len(possible_idx) == 0:
+			# Defensive fallback (should be rare)
+			option_idx = 0
+			selected_option = self.trained_options[option_idx]
+			return selected_option
+
+		# mu(o|s): softmax over feasible q-values only
+		feasible_q = q_values_t[possible_idx]
+		feasible_q = feasible_q - np.max(feasible_q)  # numerical stability
+		mu = np.exp(feasible_q)
+		mu_sum = np.sum(mu)
+		if mu_sum <= 0 or not np.isfinite(mu_sum):
+			mu = np.ones_like(mu) / len(mu)
 		else:
-			option_idx = self.agent_over_options.act(state.features(), train_mode=True)
+			mu = mu / mu_sum
+
+		# J_plus(s,o) per feasible option
+		j_plus = np.array([self.trained_options[i].J_plus(state) for i in possible_idx], dtype=np.float64)
+		j_plus = np.clip(j_plus, 0.0, 1.0)
+
+		# Final sampling weights: mu * J_plus
+		weights = mu * j_plus
+		weights_sum = np.sum(weights)
+		if weights_sum <= 0 or not np.isfinite(weights_sum):
+			probs = np.ones_like(weights) / len(weights)  # fallback uniform over feasible
+		else:
+			probs = weights / weights_sum
+
+		# Categorical sample (Algorithm 1, line 8)
+		local_choice = np.random.choice(len(possible_idx), p=probs)
+		option_idx = possible_idx[local_choice]
+
+		# Keep scheduler update for compatibility with existing DQN agent state
 		self.agent_over_options.update_epsilon()
 
-		# Selected option
 		selected_option = self.trained_options[option_idx]  # type: Option
 
-		# Debug: If it was possible to take an option, did we take it?
+		# Debug logging: If it was possible to take an option, did we take it?
 		for option in self.trained_options:  # type: Option
 			if option.is_init_true(state):
 				option_taken = option.option_idx == selected_option.option_idx
@@ -365,14 +346,6 @@ class SkillChaining(object):
 
 	def should_create_more_options(self):
 		# IVF creation rule: if for all options, E[J(s0,o)] < c1 and E[U(s0,o)] < c2 over s0~rho0
-		if not self.use_ivf:
-			local_options = self.trained_options[1:]
-			for start_state in self.init_states:
-				for option in local_options:  # type: Option
-					if option.is_init_true(start_state):
-						print("Init state is in {}'s initiation set classifier".format(option.name))
-						return False
-			return True
 		local_options = self.trained_options[1:]
 		if len(local_options) == 0:
 			return True
@@ -420,14 +393,12 @@ class SkillChaining(object):
 					state_buffer.append(state)
 
 				if self.untrained_option.is_term_true(state) and (not uo_episode_terminated) and\
-						self.max_num_options > 0 and self.untrained_option.initiation_classifier is None:
+						self.max_num_options > 0 and self.untrained_option not in self.trained_options:
 					uo_episode_terminated = True
-					if self.untrained_option.train(experience_buffer, state_buffer):
-						plot_one_class_initiation_classifier(self.untrained_option, episode, args.experiment_name)
-						self._augment_agent_with_new_option(self.untrained_option, init_q_value=self.init_q)
-						if self.should_create_more_options():
-							new_option = self.create_child_option(self.untrained_option)
-							self.untrained_option = new_option
+					self._augment_agent_with_new_option(self.untrained_option, init_q_value=self.init_q)
+					if self.should_create_more_options():
+						new_option = self.create_child_option(self.untrained_option)
+						self.untrained_option = new_option
 
 				if state.is_terminal():
 					break
@@ -562,7 +533,6 @@ if __name__ == '__main__':
 	parser.add_argument("--seed", type=int, help="Random seed for this run (default=0)", default=0)
 	parser.add_argument("--episodes", type=int, help="# episodes", default=200)
 	parser.add_argument("--steps", type=int, help="# steps", default=1000)
-	parser.add_argument("--subgoal_reward", type=float, help="SkillChaining subgoal reward", default=0.)
 	parser.add_argument("--lr_a", type=float, help="DDPG Actor learning rate", default=1e-4)
 	parser.add_argument("--lr_c", type=float, help="DDPG Critic learning rate", default=1e-3)
 	parser.add_argument("--ddpg_batch_size", type=int, help="DDPG Batch Size", default=64)
@@ -571,22 +541,15 @@ if __name__ == '__main__':
 	parser.add_argument("--generate_plots", type=bool, help="Whether or not to generate plots", default=False)
 	parser.add_argument("--tensor_log", type=bool, help="Enable tensorboard logging", default=False)
 	parser.add_argument("--control_cost", type=bool, help="Penalize high actuation solutions", default=False)
-	parser.add_argument("--dense_reward", type=bool, help="Use dense/sparse rewards", default=False)
 	parser.add_argument("--max_num_options", type=int, help="Max number of options we can learn", default=5)
-	parser.add_argument("--num_subgoal_hits", type=int, help="Number of subgoal hits to learn an option", default=3)
-	parser.add_argument("--buffer_len", type=int, help="buffer size used by option to create init sets", default=20)
-	parser.add_argument("--classifier_type", type=str, help="ocsvm/elliptic for option initiation clf", default="ocsvm")
 	parser.add_argument("--init_q", type=str, help="compute/zero", default="zero")
 	parser.add_argument("--use_smdp_update", type=bool, help="sparse/SMDP update for option policy", default=False)
-	# IVF flags and thresholds
-	parser.add_argument("--use_ivf", type=bool, help="Use IVF instead of initiation classifiers", default=False)
+	# IVF thresholds
 	parser.add_argument("--ivf_c", type=float, help="IVF initiation threshold c", default=0.5)
 	parser.add_argument("--ivf_c1", type=float, help="Creation rule threshold E[J] < c1", default=0.2)
 	parser.add_argument("--ivf_c2", type=float, help="Creation rule threshold E[U] < c2", default=0.2)
 	parser.add_argument("--uncertainty_method", type=str, help="competence/count uncertainty method", default="competence")
-	parser.add_argument("--ivf_step_penalty", type=float, help="Per-step penalty in IVF mode (non-terminal steps)", default=0.0)
-	# Selection mode for option choice
-	parser.add_argument("--selection_mode", type=str, help="epsilon_greedy/categorical option selection mode", default="epsilon_greedy")
+	parser.add_argument("--ivf_step_penalty", type=float, help="Per-step penalty for non-terminal steps", default=0.0)
 	args = parser.parse_args()
 
 	if "reacher" in args.env.lower():
@@ -596,7 +559,7 @@ if __name__ == '__main__':
 		action_dim = overall_mdp.env.action_spec().minimum.shape[0]
 	elif "maze" in args.env.lower():
 		from simple_rl.tasks.point_maze.PointMazeMDPClass import PointMazeMDP
-		overall_mdp = PointMazeMDP(dense_reward=args.dense_reward, seed=args.seed, render=args.render)
+		overall_mdp = PointMazeMDP(dense_reward=False, seed=args.seed, render=args.render)
 		state_dim = 6
 		action_dim = 2
 	elif "point" in args.env.lower():
@@ -620,19 +583,19 @@ if __name__ == '__main__':
 	create_log_dir("value_function_plots/{}".format(args.experiment_name))
 	create_log_dir("initiation_set_plots/{}".format(args.experiment_name))
 
-	print("Training skill chaining agent from scratch with a subgoal reward {}".format(args.subgoal_reward))
+	print("Training skill chaining agent from scratch")
 	print("MDP InitState = ", overall_mdp.init_state)
 
 	q0 = 0. if args.init_q == "zero" else None
 
 	chainer = SkillChaining(overall_mdp, args.steps, args.lr_a, args.lr_c, args.ddpg_batch_size,
-							seed=args.seed, subgoal_reward=args.subgoal_reward,
-							log_dir=logdir, num_subgoal_hits_required=args.num_subgoal_hits,
+							device=args.device, seed=args.seed,
+							log_dir=logdir,
 							enable_option_timeout=args.option_timeout, init_q=q0, use_full_smdp_update=args.use_smdp_update,
-							generate_plots=args.generate_plots, tensor_log=args.tensor_log, device=args.device,
-						use_ivf=args.use_ivf, ivf_c=args.ivf_c, ivf_c1=args.ivf_c1, ivf_c2=args.ivf_c2,
-						uncertainty_method=args.uncertainty_method, selection_mode=args.selection_mode,
-						ivf_step_penalty=args.ivf_step_penalty)
+							generate_plots=args.generate_plots, tensor_log=args.tensor_log,
+							ivf_c=args.ivf_c, ivf_c1=args.ivf_c1, ivf_c2=args.ivf_c2,
+							uncertainty_method=args.uncertainty_method,
+							ivf_step_penalty=args.ivf_step_penalty)
 	episodic_scores, episodic_durations = chainer.skill_chaining(args.episodes, args.steps)
 
 	# Log performance metrics
