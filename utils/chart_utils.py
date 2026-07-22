@@ -26,6 +26,9 @@ import decimal
 import sys
 import os
 import matplotlib
+# Use a non-interactive backend when running headlessly (e.g. Modal/SSH).
+if not os.environ.get("DISPLAY") and matplotlib.get_backend() not in ("agg", "Agg"):
+    matplotlib.use("Agg")
 import matplotlib.pyplot as pyplot
 import numpy as np
 import subprocess

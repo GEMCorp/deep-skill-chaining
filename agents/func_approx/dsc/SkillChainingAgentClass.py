@@ -28,7 +28,7 @@ class SkillChaining(object):
 				 init_q=None, generate_plots=False, use_full_smdp_update=False,
 				 log_dir="", seed=0, tensor_log=False,
 				 ivf_c=0.5, ivf_c1=0.2, ivf_c2=0.2, uncertainty_method="competence",
-				 ivf_step_penalty=0.0):
+				 ivf_step_penalty=0.0, experiment_name="experiment"):
 		"""                                                                       4
 		Args:
 			mdp (MDP): Underlying domain we have to solve
@@ -62,8 +62,9 @@ class SkillChaining(object):
 		self.ivf_c2 = ivf_c2
 		self.uncertainty_method = uncertainty_method
 		self.ivf_step_penalty = ivf_step_penalty
+		self.experiment_name = experiment_name
 
-		tensor_name = "runs/{}_{}".format(args.experiment_name, seed)
+		tensor_name = "runs/{}_{}".format(self.experiment_name, seed)
 		self.writer = SummaryWriter(tensor_name) if tensor_log else None
 
 		print("Initializing skill chaining with option_timeout={}, seed={}".format(self.enable_option_timeout, seed))
@@ -183,6 +184,9 @@ class SkillChaining(object):
 		q_values = []
 		for state, option_idx in state_option_pairs:
 			q_value = global_solver.get_qvalue(state.features(), option_idx)
+			# Move to CPU if it's a CUDA tensor before calling np.max
+			if hasattr(q_value, "cpu"):
+				q_value = q_value.cpu().detach().numpy()
 			q_values.append(q_value)
 		return np.max(q_values)
 
@@ -432,7 +436,7 @@ class SkillChaining(object):
 			print("\rEpisode {}\tValidation Score: {:.2f}".format(episode, eval_score))
 
 		if self.generate_plots and episode % 10 == 0:
-			render_sampled_value_function(self.global_option.solver, episode, args.experiment_name)
+			render_sampled_value_function(self.global_option.solver, episode, self.experiment_name)
 
 		for trained_option in self.trained_options:  # type: Option
 			self.num_option_executions[trained_option.name].append(episode_option_executions[trained_option.name])
@@ -440,9 +444,9 @@ class SkillChaining(object):
 				self.writer.add_scalar("{}_executions".format(trained_option.name),
 									   episode_option_executions[trained_option.name], episode)
 
-	def save_all_models(self):
+	def save_all_models(self, num_episodes=0):
 		for option in self.trained_options: # type: Option
-			save_model(option.solver, args.episodes, best=False)
+			save_model(option.solver, num_episodes, best=False)
 
 	def save_all_scores(self, pretrained, scores, durations):
 		print("\rSaving training and validation scores..")
@@ -466,25 +470,25 @@ class SkillChaining(object):
 		with open(num_option_history_file_name, "wb+") as _f:
 			pickle.dump(self.num_options_history, _f)
 
-	def perform_experiments(self):
+	def perform_experiments(self, num_episodes=0):
 		for option in self.trained_options:
-			visualize_dqn_replay_buffer(option.solver, args.experiment_name)
+			visualize_dqn_replay_buffer(option.solver, self.experiment_name)
 
 		for i, o in enumerate(self.trained_options):
 			plt.subplot(1, len(self.trained_options), i + 1)
 			plt.plot(self.option_qvalues[o.name])
 			plt.title(o.name)
-		plt.savefig("value_function_plots/{}/sampled_q_so_{}.png".format(args.experiment_name, self.seed))
+		plt.savefig("value_function_plots/{}/sampled_q_so_{}.png".format(self.experiment_name, self.seed))
 		plt.close()
 
 		for option in self.trained_options:
-			visualize_next_state_reward_heat_map(option.solver, args.episodes, args.experiment_name)
+			visualize_next_state_reward_heat_map(option.solver, num_episodes, self.experiment_name)
 
 		for i, o in enumerate(self.trained_options):
 			plt.subplot(1, len(self.trained_options), i + 1)
 			plt.plot(o.taken_or_not)
 			plt.title(o.name)
-		plt.savefig("value_function_plots/{}_taken_or_not_{}.png".format(args.experiment_name, self.seed))
+		plt.savefig("value_function_plots/{}_taken_or_not_{}.png".format(self.experiment_name, self.seed))
 		plt.close()
 
 	def trained_forward_pass(self, render=True):

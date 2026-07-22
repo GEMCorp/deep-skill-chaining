@@ -99,7 +99,7 @@ class Option(object):
 			nn.Linear(64, 1),
 			nn.Sigmoid()
 		).to(self.device)
-		for tparam, param in zip(self.ivf_target_net.parameters(), self.ivf_net.parameters()):
+		for tparam,  param in zip(self.ivf_target_net.parameters(), self.ivf_net.parameters()):
 			tparam.data.copy_(param.data)
 		self.ivf_optimizer = optim.Adam(self.ivf_net.parameters(), lr=1e-3)
 		self.ivf_target_tau = 1e-3
